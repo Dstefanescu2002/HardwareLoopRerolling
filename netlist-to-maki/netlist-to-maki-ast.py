@@ -476,9 +476,56 @@ def do_analysis(bench, format):
     defs = {**defs, **memwrites}
 
     og_netlist = netlist_to_ast(defs)
+    db_netlist = convert_to_debruijn(og_netlist)
     with open('results/' + bench[18:-4] + 'txt', 'w') as f:
         f.write("wires: {}, nets: {}".format(len(pyrtl.working_block().wirevector_set), len(pyrtl.working_block().logic)) + "\n")
-        f.write(str(og_netlist))
+        f.write(str(db_netlist))
+    return db_netlist
+
+def convert_to_debruijn(netlist):
+    
+    var = {}
+
+    def renameVarUses(c, argOp, argIndex, cur_index):
+        if isinstance(c, (AssignCmd, DefCmd)):
+            renameVarUses(c.rhs, None, None, cur_index)
+            return
+        if isinstance(c, (WireExp, ValExp)):
+            for i,a in enumerate(c.args):
+                renameVarUses(a, c.op, i, cur_index)
+            return
+        if isinstance(c, (Wire, Var)) and str(c.name) in var:
+            if (argOp == 'array-ref' and argIndex == 0):
+                c.name = '{}'.format(var[str(c.name)] - cur_index)
+            elif argOp == 's' and argIndex == 0:
+                c.name = '{}'.format(var[str(c.name)] - cur_index)
+            elif argOp == 's' and argIndex and argIndex > 0:
+                c.name = '(& {})'.format(var[str(c.name)] - cur_index)
+            elif argOp in ['a+','a-','a*','a/','a%']:
+                c.name = '(& {})'.format(var[str(c.name)] - cur_index)
+            else:
+                c.name = '{}'.format(var[str(c.name)] - cur_index)
+            return
+        if isinstance(c, WireSlice):
+            for h in c.vexps:
+                renameVarUses(h, 's', None, cur_index)
+            return
+        if isinstance(c, ForCmd):
+            for b in c.body.cmds:
+                renameVarUses(b, None, None, cur_index)
+            return
+        return
+
+    for index, cmd in enumerate(netlist.cmds):
+        if isinstance(cmd, DefCmd):
+            var[cmd.lhs.name.value] = index
+            renameVarUses(cmd, None, None, index)
+            cmd.lhs.name.value = index
+        else:
+            renameVarUses(cmd, None, None, index)
+        # 
+    return netlist
+        
 
 # Given a BLIF file, import the netlist into PyRTL,
 # run some optimizations over it to remove undriven/unused wires,
@@ -502,7 +549,7 @@ def run_benchmark(bench, clock, format):
 
     #print(pyrtl.working_block())
     pyrtl.combine_slice_concats()
-    do_analysis(bench, format)
+    return do_analysis(bench, format)
 
 if __name__ == '__main__':
     if len(sys.argv) - 1 < 2:
@@ -520,5 +567,5 @@ if __name__ == '__main__':
 
     blif_filename = sys.argv[2]
     print('\nRunning benchmark:', blif_filename)
-    run_benchmark(blif_filename, clock, format)
+    netlist = run_benchmark(blif_filename, clock, format)
     exit(0)
