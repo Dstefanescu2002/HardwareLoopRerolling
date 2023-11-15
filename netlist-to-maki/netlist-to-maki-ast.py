@@ -476,6 +476,7 @@ def do_analysis(bench, format):
     defs = {**defs, **memwrites}
 
     og_netlist = netlist_to_ast(defs)
+    print (og_netlist)
     db_netlist = convert_to_debruijn(og_netlist)
     with open('results/' + bench[18:-4] + 'txt', 'w') as f:
         f.write("wires: {}, nets: {}".format(len(pyrtl.working_block().wirevector_set), len(pyrtl.working_block().logic)) + "\n")
@@ -517,7 +518,7 @@ def convert_to_debruijn(netlist):
         return
 
     for index, cmd in enumerate(netlist.cmds):
-        if isinstance(cmd, DefCmd):
+        if isinstance(cmd, (DefCmd, AssignCmd)):
             var[cmd.lhs.name.value] = index
             renameVarUses(cmd, None, None, index)
             cmd.lhs.name.value = index
