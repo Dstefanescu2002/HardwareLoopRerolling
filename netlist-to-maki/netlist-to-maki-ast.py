@@ -110,6 +110,8 @@ class WireExp(AST):
         elif self.op in '@':
             args = ' '.join(str(a) for a in self.args)
             return '({} {})'.format(op, args)
+        elif self.op in ['Register', 'Input', 'Output']:
+            return '({} {})'.format(op, self.args[1])
         else:
             args = ' '.join(str(a) for a in self.args)
             return '({} {})'.format(op, args)
@@ -479,7 +481,7 @@ def do_analysis(bench, format):
     print (og_netlist)
     db_netlist = convert_to_debruijn(og_netlist)
     with open('results/' + bench[18:-4] + 'txt', 'w') as f:
-        f.write("wires: {}, nets: {}".format(len(pyrtl.working_block().wirevector_set), len(pyrtl.working_block().logic)) + "\n")
+        # f.write("wires: {}, nets: {}".format(len(pyrtl.working_block().wirevector_set), len(pyrtl.working_block().logic)) + "\n")
         f.write(str(db_netlist))
     return db_netlist
 
