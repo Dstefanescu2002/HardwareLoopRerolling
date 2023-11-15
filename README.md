@@ -13,4 +13,6 @@ We believe that an alternative, Programming by Demonstration approach to loop re
 * Guarantee that the synthesized HDL program is closest to the original HDL program
 * Drastically improve the synthesis time
 
-## Approach
+## Setup
+Open the docker container using the Dockerfile provided. The codebase currently has the following capabilities:
+* Convert Netlist to Maki
