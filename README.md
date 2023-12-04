@@ -15,4 +15,4 @@ We believe that an alternative, Programming by Demonstration approach to loop re
 
 ## Setup
 Open the docker container using the Dockerfile provided. The codebase currently has the following capabilities:
-* Convert Netlist to Maki
+* Convert Netlist to Maki (with DeBruijn indices)

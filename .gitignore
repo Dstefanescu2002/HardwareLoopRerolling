@@ -1,3 +1,6 @@
 .DS_Store
 .devcontainer
 netlist-to-maki/results/
+loop-rerolling/
+netlist-to-maki/results_rerolled/
+*.pyc

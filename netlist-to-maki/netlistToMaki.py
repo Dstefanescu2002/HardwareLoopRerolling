@@ -4,8 +4,9 @@ import copy
 import math
 import pyrtl
 import sys
-
+from suffixarray import suffix_array, lcp_array, tandem_repeats
 import signal
+import copy
 
 class TimeoutException(Exception):
     pass
@@ -158,6 +159,226 @@ class ArrayCreate(AST):
     _fields = ('size',)
     def __str__(self):
         return '(array-create ' + str(self.size) + ')'
+
+# Tokenize a Maki IR AST.
+# Recurisvely walks the AST;
+# primarily considers WireVector expression operators.
+def ast_to_tokens(ast):
+    if isinstance(ast, Block):
+        cmds = ()
+        for c in ast.cmds:
+            cmds += (ast_to_tokens(c),)
+        return cmds
+    elif isinstance(ast, DefCmd):
+        # lhs rhs
+        lhs = ast_to_tokens(ast.lhs)
+        rhs = ast_to_tokens(ast.rhs)
+        return (lhs, rhs)
+    elif isinstance(ast, AssignCmd):
+        # lhs rhs
+        if isinstance(ast.lhs, Wire):
+            lhs = str(ast.lhs.bitwidth) + ast.lhs.type
+        else:
+            lhs = ast_to_tokens(ast.lhs)
+        rhs = ast_to_tokens(ast.rhs)
+        return (lhs, rhs)
+    elif isinstance(ast, ForCmd):
+        body = ast_to_tokens(ast.body)
+        return ('LOOPSTART',) + body + ('LOOPEND',)
+    elif isinstance(ast, WireExp):
+        # op args
+        argtokens = [ast_to_tokens(a) for a in ast.args]
+        argtokens = '-'.join(a for a in argtokens if a != '')
+        op = {
+                '+': '+',
+                '-': '-',
+                '*': '*',
+                '&': '&',
+                '|': '|',
+                '^': '^',
+                '=': '=',
+                '<': '<',
+                '>': '>',
+                'n': 'n',
+                '~': '~',
+                'x': 'x',
+                'c': 'c',
+                'Input': 'I',
+                'Output': 'O',
+                'Register': 'R',
+                'Const': 'C',
+                's': 's',
+                'r': 'r',
+                'w': 'w',
+                'm': 'm',
+                '@': '@',
+        }[ast.op]
+        return '{}'.format(op) + (argtokens if ast.op in 'csx' else \
+                argtokens.translate({ord(i): None for i in argtokens if i in 'C'}))
+    elif isinstance(ast, Wire):
+        # ignore
+        return ''
+    elif isinstance(ast, WireSlice):
+        # vexps
+        vexps = ','.join(ast_to_tokens(v) for v in ast.vexps)
+        return '({})'.format(vexps)
+    elif isinstance(ast, ValExp):
+        return ''
+    elif isinstance(ast, Var):
+        # ignore
+        return ''
+    elif isinstance(ast, VarIndex):
+        # ignore
+        return ''
+    elif isinstance(ast, VarSlice):
+        # ignore
+        return ''
+    elif isinstance(ast, Literal):
+        # ignore
+        return ''
+    else:
+        return ''
+
+# Translate Maki IR AST to concrete syntax ingestible by Racket tool
+def ir_to_racket(ast, netlist_name):
+    var = dict() # var name -> uint
+    vid = 0
+
+    # sv-gen
+    internal_signals = dict()
+
+    inputs = ''
+    inputsn = 0
+    outputs = ''
+    outputsn = 0
+    registers = ''
+    registersn = 0
+    removeCmds = set()
+    def mapVarToNum(ast, vid):
+        for c in ast.cmds:
+            if isinstance(c, (AssignCmd, DefCmd)):
+                if not str(c.lhs.name) in var:
+                    var[str(c.lhs.name)] = vid
+                    if isinstance(c.lhs, Wire):
+                        internal_signals[vid] = c.lhs.bitwidth
+                    vid += 1
+                c.lhs.name = var[str(c.lhs.name)]
+            elif isinstance(c, ForCmd):
+                var[str(c.index)] = vid
+                internal_signals[vid] = c.lhs.bitwidth
+                vid += 1
+                c.index = var[str(c.index)]
+                vid = mapVarToNum(c.body, vid)
+        return vid
+    mapVarToNum(ast, vid)
+
+    return var
+
+def tokens_to_string(tokens):
+    s = ''
+    for t in tokens:
+        s += '{}{}{} '.format(t[0], t[1], str(t[2:]) if len(t) > 2 else '')
+    return s
+
+# From a tokenized Maki AST, returns a maximal tandem repeat.
+# Relies on suffixarray library.
+def get_tandem_repeats_from_tokens(s):
+    sa = suffix_array(s)
+    lcp = lcp_array(s, sa)
+
+    tandems = tandem_repeats(s, sa, lcp)
+    max_repeater = ''
+    for k,v in tandems.items():
+        str_ops = ''.join([str(w[1]) for w in k])
+        str_ops = str_ops.translate({ord(i): None for i in str_ops if i in ' ,'})
+        str_IOR = str_ops.translate({ord(i): None for i in str_ops if i not in 'IORCwr'})
+
+        if str_IOR and str_ops == len(str_IOR) * str_IOR[0]:
+            continue
+        if not str_ops:
+            continue
+        elif v[1] < 3:
+            continue
+        elif not max_repeater:
+            max_repeater = k
+            continue
+        elif v[1] > tandems[max_repeater][1]:
+            max_repeater = k
+        elif v[1] == tandems[max_repeater][1] and v[0] > tandems[max_repeater][0]:
+            max_repeater = k
+        elif v[1] == tandems[max_repeater][1] and len(k) > len(max_repeater):
+            max_repeater = k
+
+    if not max_repeater:
+        return (None,None,None)
+
+    start = tandems[max_repeater][0]
+    length = len(max_repeater) * tandems[max_repeater][1]
+    return (tandems[max_repeater][0], len(max_repeater), tandems[max_repeater][1])
+    # Returns (start-of-loop, length-of-rerolled-loop-body, number-of-repeats)
+
+# Identifies a loop candidate from a tokenized Maki program.
+# Note: This returns the maximal loop candidate;
+# this function is intended to be called repeatedly
+# until all viable/interesting loop candidates are found.
+# (See `blif-benchmark.py` find_loops() for an example.)
+def loop_id(ast):
+
+    tok = ast_to_tokens(ast)
+
+    s,l,r = get_tandem_repeats_from_tokens(tok)
+    # Returns (start-of-loop, length-of-rerolled-loop-body, number-of-repeats)
+    if not s:
+        return (None, ast)
+
+    startCmd = s
+    lengthCmd = l
+    endCmd = startCmd + lengthCmd * r
+
+    pre = Block(ast.cmds[0:startCmd])
+
+    loop = Block(ast.cmds[startCmd:startCmd + lengthCmd * 1]) # first iteration
+
+    post = Block(ast.cmds[endCmd:])
+
+    ports = 0
+    for c in pre.cmds:
+        if isinstance(c, DefCmd):
+            if isinstance(c.rhs, WireExp):
+                if c.rhs.op == 'Input':
+                    ports += 1
+                elif c.rhs.op == 'Output':
+                    ports += 1
+                elif c.rhs.op == 'Register':
+                    ports += 1
+                else:
+                    continue
+
+    return ([(loop.cmds[0].body.cmds[0].lhs.name if isinstance(loop.cmds[0], ForCmd) else loop.cmds[0].lhs.name),l,r], Block(pre.cmds + [ForCmd(Literal(ast.newHole()), Literal(r), Block(loop.cmds))] + post.cmds))
+
+
+def find_loops(ir, varMap):
+
+    def timeout_handler(signum, frame):
+        raise TimeoutException()
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(3600)
+
+    loops = []
+    try:
+        while True:
+            newLoop, ir = loop_id(ir)
+            if not newLoop:
+                break
+            newLoop[0] = varMap[str(newLoop[0])]
+            loops += [newLoop]
+        loops.sort(key=lambda x: x[0] + (x[1] * x[2]))
+    except TimeoutException:
+        print("Loop identifier timeout!")
+        return loops
+    signal.alarm(0)
+    return loops
 
 # Dataflow analysis over Maki IR Block.
 # Returns list of WireVector variable definitions.
@@ -459,31 +680,13 @@ def netlist_to_ast(defs, foldSelects=True):
                         and isinstance(useCmd.rhs, WireExp):
                     for ai,arg in enumerate(useCmd.rhs.args):
                         if str(c.lhs) == str(arg):
-                            cmds[j].rhs.args[ai] = WireExp('s', c.rhs.args)
+                            cmds[j].rhs.args[ai] = WireExp('s', [copy.deepcopy(x) for x in c.rhs.args])
                             removeSels.add(c)
     for r in removeSels:
         cmds.remove(r)
 
     return Block(cmds)
 
-# Given a PyRTL netlist (bench),
-# translate it to Maki AST and run loop identification over it (find_loops()).
-# Finally, write the concrete Maki IR with loop candidates annotated to a file.
-def do_analysis(bench, format):
-    defs, uses = pyrtl.working_block().net_connections(include_virtual_nodes=True)
-    memwrites = dict()
-    for x in pyrtl.working_block().logic:
-        if x.op == '@':
-            memwrites[x.op_param[0]] = x
-    defs = {**defs, **memwrites}
-
-    og_netlist = netlist_to_ast(defs)
-    print (og_netlist)
-    db_netlist = convert_to_debruijn(og_netlist)
-    with open('results/' + bench[18:-4] + 'txt', 'w') as f:
-        # f.write("wires: {}, nets: {}".format(len(pyrtl.working_block().wirevector_set), len(pyrtl.working_block().logic)) + "\n")
-        f.write(str(db_netlist))
-    return db_netlist
 
 def convert_to_debruijn(netlist):
     
@@ -529,46 +732,3 @@ def convert_to_debruijn(netlist):
         # 
     return netlist
         
-
-# Given a BLIF file, import the netlist into PyRTL,
-# run some optimizations over it to remove undriven/unused wires,
-# and finally start the loop identification process (do_analysis()).
-def run_benchmark(bench, clock, format):
-    with open(bench) as f:
-        blif = f.read()
-    pyrtl.input_from_blif(blif, clock_name=clock)
-
-    srcs, dsts = pyrtl.working_block().net_connections()
-    dest_set = set(srcs.keys())
-    arg_set = set(dsts.keys())
-    full_set = dest_set | arg_set
-    connected_minus_allwires = full_set.difference(pyrtl.working_block().wirevector_set)
-    all_input_and_consts = pyrtl.working_block().wirevector_subset((pyrtl.Input, pyrtl.Const))
-    allwires_minus_connected = pyrtl.working_block().wirevector_set.difference(full_set)
-    allwires_minus_connected = allwires_minus_connected.difference(all_input_and_consts)
-    for w in allwires_minus_connected:
-        print("not",w)
-        pyrtl.working_block().remove_wirevector(w)
-
-    #print(pyrtl.working_block())
-    pyrtl.combine_slice_concats()
-    return do_analysis(bench, format)
-
-if __name__ == '__main__':
-    if len(sys.argv) - 1 < 2:
-        print(help_text)
-        exit(1)
-
-    format = sys.argv[1]
-    if format not in ('-pyrtl', '-sv'):
-        print(help_text)
-        exit(1)
-
-    clock = 'clk'
-    if len(sys.argv) - 1 == 3:
-        clock = sys.argv[3]
-
-    blif_filename = sys.argv[2]
-    print('\nRunning benchmark:', blif_filename)
-    netlist = run_benchmark(blif_filename, clock, format)
-    exit(0)
