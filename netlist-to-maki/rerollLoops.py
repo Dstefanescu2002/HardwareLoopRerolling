@@ -1,4 +1,4 @@
-from netlistToMaki import ForCmd, Block, AssignCmd, DefCmd, Wire, Var, WireExp, ValExp, WireSlice, VarIndex, ArrayCreate
+from netlistToMaki import ForCmd, Block, AssignCmd, DefCmd, Wire, Var, WireExp, ValExp, WireSlice, VarIndex, ArrayCreate, Literal
 import copy
 
 def reroll_loops(maki_prog, loops):
@@ -74,7 +74,7 @@ def fix_inner_deps(for_cmd, for_start, og_maki_prog):
 def insert_cmd(maki_prog, index, cmd):
 
     def add_one(var, ref_index, cur_index):
-        if int(var) + cur_index <= ref_index:
+        if int(var) + cur_index < ref_index:
             return int(var) - 1
         return int(var)
 
@@ -137,14 +137,13 @@ def fix_after_deps(maki_prog, for_cmd, for_start):
             if (spot in new_array_lines):
                 return
             new_arrays.append(DefCmd('Array', ArrayCreate(loop_iters)))
-            new_array_inserts.append((spot+1, AssignCmd(for_start-index-len(new_arrays), WireExp('c', [-spot-2-len(new_arrays), -1]))))
+            new_array_inserts.append((spot+1, AssignCmd(str(-2-spot-len(new_arrays)), WireExp('array-store', ['i', Var(-1)]))))
             for ai,arg in enumerate(maki_prog.cmds[cur_index].rhs.args):
                 if str(var) == str(arg):
-                    print (cur_index)
-                    maki_prog.cmds[cur_index].rhs.args = maki_prog.cmds[cur_index].rhs.args[:ai] + [WireExp('s', [for_start-cur_index-len(new_arrays), which_iter])] + maki_prog.cmds[cur_index].rhs.args[ai:]
+                    maki_prog.cmds[cur_index].rhs.args = maki_prog.cmds[cur_index].rhs.args[:ai] + [WireExp('array-ref', [Var(for_start-cur_index-len(new_arrays)), WireSlice([which_iter])])] + maki_prog.cmds[cur_index].rhs.args[ai:]
             new_array_lines.add(spot)
         elif index < for_start:
-            c.name = str(int(c.name) + loop_size*loop_iters - (1))
+            c.name = str(int(c.name) + loop_size*loop_iters - 1)
 
     def add_array_refs(c, argOp, argIndex, cur_index):
         if isinstance(c, (AssignCmd, DefCmd)):
@@ -178,7 +177,7 @@ def fix_after_deps(maki_prog, for_cmd, for_start):
             return
         return
 
-    for i in range(loop_end, len(maki_prog.cmds)):
+    for i in range(for_start + 1, len(maki_prog.cmds)):
         add_array_refs(maki_prog.cmds[i], None, None, i)
     
     for c in new_arrays:
@@ -187,13 +186,60 @@ def fix_after_deps(maki_prog, for_cmd, for_start):
     for i, c in new_array_inserts:
         insert_cmd(for_cmd.body, i, c)
 
+def debruijn_to_reg(db_prog):
+
+    def adjust(dbi, cur_index, in_for):
+        if abs(dbi) <= in_for:
+            return '{}.{}'.format(cur_index - in_for - 1, in_for + dbi)
+        return dbi + cur_index
+
+    def renameVarUses(c, argOp, argIndex, cur_index, in_for):
+        if isinstance(c, (AssignCmd, DefCmd)):
+            renameVarUses(c.rhs, None, None, cur_index, in_for)
+            return
+        if isinstance(c, (WireExp, ValExp)):
+            for i,a in enumerate(c.args):
+                renameVarUses(a, c.op, i, cur_index, in_for)
+            return
+        if isinstance(c, (Wire, Var)):
+            if (argOp == 'array-ref' and argIndex == 0):
+                c.name = '{}'.format(adjust(int(c.name), cur_index, in_for))
+            elif argOp == 's' and argIndex == 0:
+                c.name = '{}'.format(adjust(int(c.name), cur_index, in_for))
+            elif argOp == 's' and argIndex and argIndex > 0:
+                c.name = '(& {})'.format(adjust(int(c.name), cur_index, in_for))
+            elif argOp in ['a+','a-','a*','a/','a%']:
+                c.name = '(& {})'.format(adjust(int(c.name), cur_index, in_for))
+            else:
+                c.name = '{}'.format(adjust(int(c.name), cur_index, in_for))
+            return
+        if isinstance(c, WireSlice):
+            # if c_next.vexps[0] != c.vexps[0]:
+            #     c.vexps[0] = for_cmd.index
+            for i, h in enumerate(c.vexps):
+                renameVarUses(h, 's', None, cur_index, in_for)
+            return
+        if isinstance(c, ForCmd):
+            for i, b in enumerate(c.body.cmds):
+                if isinstance(b, DefCmd):
+                    b.lhs = '{}.{}'.format(cur_index, i)
+                elif isinstance(b, AssignCmd):
+                    b.lhs = int(b.lhs) + (i+1+cur_index)
+                renameVarUses(b, None, None, i+1+cur_index, i)
+            return
+        return
+
+    for i, cmd in enumerate(db_prog.cmds):
+        cmd.lhs = str(i)
+        renameVarUses(cmd, None, None, i, -1)
+        
+
 def insert_loop(maki_prog, start, size, num_iters):
     og_maki_prog = copy.deepcopy(maki_prog)
     block_cmds = maki_prog.cmds
     line_start = -1
     for i, cmd in enumerate(block_cmds):
         if str(start) == str(cmd.lhs):
-            print (i)
             line_start = i
             break
     if line_start == -1:
@@ -203,4 +249,5 @@ def insert_loop(maki_prog, start, size, num_iters):
     line_start = line_start + len(to_add)
     maki_prog = Block(maki_prog.cmds[:line_start] + [for_cmd] + maki_prog.cmds[line_start+size*num_iters:])
     fix_after_deps(maki_prog, for_cmd, line_start)
+    debruijn_to_reg(maki_prog)
     return maki_prog

@@ -74,6 +74,8 @@ class WireExp(AST):
                 'w': '<w=',
                 'm': 'wm',
                 '@': 'w@',
+                'array-store': 'array-store',
+                'array-ref': 'array-ref'
             }[self.op]
 
         if self.op in '+-*&|^=<>n':
