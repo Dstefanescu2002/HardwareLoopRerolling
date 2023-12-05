@@ -2,7 +2,7 @@ from netlistToMaki import ForCmd, Block, AssignCmd, DefCmd, Wire, Var, WireExp, 
 import copy
 
 def reroll_loops(maki_prog, loops):
-    for loop in loops:
+    for loop in loops[1:]:
         prog_with_loop = insert_loop(maki_prog, loop[0], loop[1], loop[2])
         return prog_with_loop
 
@@ -22,6 +22,8 @@ def fix_inner_deps(for_cmd, for_start, og_maki_prog):
             new_dist = -cur_index - len(to_add) - 2
             to_add.append(DefCmd(Var('none', ''), (for_start + cur_index + int(var)) - (for_start - len(to_add))) )
             added[origional_var] = len(to_add) - 1
+            assign_location = len(body) + cur_index + int(var)
+            for_cmd.body.cmds[assign_location] = AssignCmd(-assign_location - len(to_add) - 2, for_cmd.body.cmds[assign_location].rhs)
             return new_dist
         elif (abs(int(var)) >= cur_index):
             to_fix.append(c)
